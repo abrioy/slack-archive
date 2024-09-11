@@ -37,7 +37,7 @@ function isChannels(input: any): input is ConversationsListResponse {
 
 export async function downloadChannels(
   options: ConversationsListArguments,
-  users: Users
+  users: Users,
 ): Promise<Array<Channel>> {
   const channels: Array<Channel> = [];
 
@@ -47,10 +47,9 @@ export async function downloadChannels(
 
   const spinner = ora("Downloading channels").start();
 
-  for await (const page of getWebClient().paginate(
-    "conversations.list",
-    options
-  )) {
+  for await (const page of getWebClient().paginate("conversations.list", {
+    ...options,
+  })) {
     if (isChannels(page)) {
       spinner.text = `Found ${page.channels?.length} channels (found so far: ${
         channels.length + (page.channels?.length || 0)

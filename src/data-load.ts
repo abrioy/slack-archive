@@ -5,6 +5,7 @@ import {
   Channel,
   Emojis,
   SearchFile,
+  Team,
   Users,
 } from "./interfaces.js";
 import {
@@ -12,6 +13,7 @@ import {
   EMOJIS_DATA_PATH,
   getChannelDataFilePath,
   SEARCH_DATA_PATH,
+  TEAM_DATA_PATH,
   USERS_DATA_PATH,
 } from "./config.js";
 import { retry } from "./retry.js";
@@ -30,7 +32,7 @@ export const messagesCache: Record<string, Array<ArchiveMessage>> = {};
 
 export async function getMessages(
   channelId: string,
-  cachedOk: boolean = false
+  cachedOk: boolean = false,
 ): Promise<Array<ArchiveMessage>> {
   if (cachedOk && messagesCache[channelId]) {
     return messagesCache[channelId];
@@ -46,8 +48,12 @@ export async function getUsers(): Promise<Users> {
   return getFile<Users>(USERS_DATA_PATH, {});
 }
 
-export async function getEmoji(): Promise<Emojis> {
-  return getFile<Emojis>(EMOJIS_DATA_PATH, {});
+export async function getTeam(): Promise<Team> {
+  return getFile<Team>(TEAM_DATA_PATH, {});
+}
+
+export async function getEmoji(): Promise<Record<string, string>> {
+  return getFile<Record<string, string>>(EMOJIS_DATA_PATH, {});
 }
 
 export async function getChannels(): Promise<Array<Channel>> {

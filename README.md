@@ -73,6 +73,7 @@ Then, add the following `User Token Scopes`:
  * mpim:history
  * mpim:read
  * remote_files:read
+ * team:read
  * users:read
 
 Finally, head back to `Basic Information` and make a note of your app's `client

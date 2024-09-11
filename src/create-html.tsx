@@ -1,53 +1,61 @@
+import { escapeForSlackWithMarkdown } from "@clearfeed-ai/slack-to-html";
 import { format } from "date-fns";
+import esMain from "es-main";
 import fs from "fs-extra";
-import path from "path";
+import { chunk, sortBy } from "lodash-es";
+import ora, { Ora } from "ora";
+import path, { dirname } from "path";
 import React from "react";
 import ReactDOMServer from "react-dom/server.js";
-import ora, { Ora } from "ora";
-import { chunk, sortBy } from "lodash-es";
-import { dirname } from "path";
 import { fileURLToPath } from "url";
-import esMain from "es-main";
-import slackMarkdown from "slack-markdown";
-
-import { getChannels, getMessages, getUsers } from "./data-load.js";
-import {
-  ArchiveMessage,
-  Channel,
-  ChunksInfo,
-  Message,
-  Reaction,
-  SlackArchiveData,
-  User,
-  Users,
-} from "./interfaces.js";
-import {
-  getHTMLFilePath,
-  INDEX_PATH,
-  OUT_DIR,
-  MESSAGES_JS_PATH,
-  FORCE_HTML_GENERATION,
-} from "./config.js";
-import { slackTimestampToJavaScriptTimestamp } from "./timestamp.js";
-import { recordPage } from "./search.js";
-import { write } from "./data-write.js";
 import { getSlackArchiveData } from "./archive-data.js";
-import { getEmojiFilePath, getEmojiUnicode, isEmojiUnicode } from "./emoji.js";
-import { getName } from "./users.js";
 import {
+  getChannelName,
   isBotChannel,
   isDmChannel,
   isPrivateChannel,
   isPublicChannel,
 } from "./channels.js";
+import {
+  FORCE_HTML_GENERATION,
+  getHTMLFilePath,
+  INDEX_PATH,
+  MESSAGES_JS_PATH,
+  OUT_DIR,
+} from "./config.js";
+import { getChannels, getMessages, getTeam, getUsers } from "./data-load.js";
+import { write } from "./data-write.js";
+import { getEmojis } from "./emoji.js";
+import {
+  ArchiveMessage,
+  Channel,
+  ChunksInfo,
+  Emoji,
+  Emojis,
+  Message,
+  Reaction,
+  SlackArchiveData,
+  Team,
+  User,
+  Users,
+} from "./interfaces.js";
+import { recordPage } from "./search.js";
+import { slackTimestampToJavaScriptTimestamp } from "./timestamp.js";
+import { getName } from "./users.js";
+import { getTeamIconPath } from "./team.js";
 
 const _dirname = dirname(fileURLToPath(import.meta.url));
 const MESSAGE_CHUNK = 1000;
+const EMOJI_PREFIX_BUGFIX = "http://replaceme/";
 
 // This used to be a prop on the components, but passing it around
 // was surprisingly slow. Global variables are cool again!
 // Set by createHtmlForChannels().
 let users: Users = {};
+let team: Team = {};
+let emojis: Emojis = {};
+let channels: Channel[] = [];
+let markdownToHtmlOptions: any = {};
 let slackArchiveData: SlackArchiveData = { channels: {} };
 let me: User | null;
 
@@ -162,9 +170,11 @@ const Reaction: React.FunctionComponent<ReactionProps> = ({ reaction }) => {
     }
   }
 
+  const emoji = (reaction.name && emojis[reaction.name]) || null;
+
   return (
     <div className="reaction" title={reactors.join(", ")}>
-      <Emoji name={reaction.name!} />
+      <EmojiImage name={reaction.name!} emoji={emoji} />
       <span>{reaction.count}</span>
     </div>
   );
@@ -172,13 +182,14 @@ const Reaction: React.FunctionComponent<ReactionProps> = ({ reaction }) => {
 
 interface EmojiProps {
   name: string;
+  emoji: Emoji | null;
 }
-const Emoji: React.FunctionComponent<EmojiProps> = ({ name }) => {
-  if (isEmojiUnicode(name)) {
-    return <>{getEmojiUnicode(name)}</>;
+const EmojiImage: React.FunctionComponent<EmojiProps> = ({ name, emoji }) => {
+  if (!emoji) {
+    return <span title={`:${name}:`}>:{name}:</span>;
+  } else {
+    return <img alt={`:${emoji.name}:`} src={emoji.path} />;
   }
-
-  return <img src={getEmojiFilePath(name)} />;
 };
 
 interface MessageProps {
@@ -188,10 +199,6 @@ interface MessageProps {
 const Message: React.FunctionComponent<MessageProps> = (props) => {
   const { message } = props;
   const username = getName(message.user, users);
-  const slackCallbacks = {
-    user: ({ id }: { id: string }) => `@${getName(id, users)}`,
-  };
-
   return (
     <div className="message-gutter" id={message.ts}>
       <div className="" data-stringify-ignore="true">
@@ -206,10 +213,10 @@ const Message: React.FunctionComponent<MessageProps> = (props) => {
         <div
           className="text"
           dangerouslySetInnerHTML={{
-            __html: slackMarkdown.toHTML(message.text, {
-              escapeHTML: false,
-              slackCallbacks,
-            }),
+            __html: escapeForSlackWithMarkdown(
+              message.text,
+              markdownToHtmlOptions,
+            ).replaceAll(EMOJI_PREFIX_BUGFIX, ""),
           }}
         />
         {props.children}
@@ -282,7 +289,7 @@ const ChannelLink: React.FunctionComponent<ChannelLinkProps> = ({
     <li key={name}>
       <a title={name} href={`html/${channel.id!}-0.html`} target="iframe">
         {leadSymbol}
-        <span>{name}</span>
+        <span className="channel-name">{name}</span>
       </a>
     </li>
   );
@@ -313,7 +320,7 @@ const IndexPage: React.FunctionComponent<IndexPageProps> = (props) => {
 
   const dmChannels = sortedChannels
     .filter(
-      (channel) => isDmChannel(channel, users) && !users[channel.user!].deleted
+      (channel) => isDmChannel(channel, users) && !users[channel.user!].deleted,
     )
     .sort((a, b) => {
       // Self first
@@ -328,7 +335,7 @@ const IndexPage: React.FunctionComponent<IndexPageProps> = (props) => {
 
   const dmDeletedChannels = sortedChannels
     .filter(
-      (channel) => isDmChannel(channel, users) && users[channel.user!].deleted
+      (channel) => isDmChannel(channel, users) && users[channel.user!].deleted,
     )
     .sort((a, b) => (a.name || "Unknown").localeCompare(b.name || "Unknown"))
     .map((channel) => <ChannelLink key={channel.id} channel={channel} />);
@@ -348,29 +355,98 @@ const IndexPage: React.FunctionComponent<IndexPageProps> = (props) => {
     })
     .map((channel) => <ChannelLink key={channel.id} channel={channel} />);
 
+  const sections = [];
+  if (publicChannels.length) {
+    sections.push(
+      <>
+        <p className="section">Public Channels</p>
+        <ul>{publicChannels}</ul>
+      </>,
+    );
+  }
+
+  if (privateChannels.length) {
+    sections.push(
+      <>
+        <p className="section">Private Channels</p>
+        <ul>{privateChannels}</ul>
+      </>,
+    );
+  }
+
+  if (dmChannels.length) {
+    sections.push(
+      <>
+        <p className="section">DMs</p>
+        <ul>{dmChannels}</ul>
+      </>,
+    );
+  }
+
+  if (groupChannels.length) {
+    sections.push(
+      <>
+        <p className="section">Group DMs</p>
+        <ul>{groupChannels}</ul>
+      </>,
+    );
+  }
+
+  if (botChannels.length) {
+    sections.push(
+      <>
+        <p className="section">Bots</p>
+        <ul>{botChannels}</ul>
+      </>,
+    );
+  }
+
+  if (publicArchivedChannels.length) {
+    sections.push(
+      <>
+        <p className="section">Archived Public Channels</p>
+        <ul>{publicArchivedChannels}</ul>
+      </>,
+    );
+  }
+
+  if (privateArchivedChannels.length) {
+    sections.push(
+      <>
+        <p className="section">Archived Private Channels</p>
+        <ul>{privateArchivedChannels}</ul>
+      </>,
+    );
+  }
+
+  if (dmDeletedChannels.length) {
+    sections.push(
+      <>
+        <p className="section">DMs (Deleted Users)</p>
+        <ul>{dmDeletedChannels}</ul>
+      </>,
+    );
+  }
+
   return (
     <HtmlPage>
       <div id="index">
         <div id="channels">
-          <p className="section">Public Channels</p>
-          <ul>{publicChannels}</ul>
-          <p className="section">Private Channels</p>
-          <ul>{privateChannels}</ul>
-          <p className="section">DMs</p>
-          <ul>{dmChannels}</ul>
-          <p className="section">Group DMs</p>
-          <ul>{groupChannels}</ul>
-          <p className="section">Bots</p>
-          <ul>{botChannels}</ul>
-          <p className="section">Archived Public Channels</p>
-          <ul>{publicArchivedChannels}</ul>
-          <p className="section">Archived Private Channels</p>
-          <ul>{privateArchivedChannels}</ul>
-          <p className="section">DMs (Deleted Users)</p>
-          <ul>{dmDeletedChannels}</ul>
+          <p id="team" className="section">
+            <img
+              alt={`${team.name} logo`}
+              src={getTeamIconPath(team, false).relativePath}
+            />
+            <h1>{team.name}</h1>
+          </p>
+          {sections}
         </div>
         <div id="messages">
-          <iframe name="iframe" src={`html/${channels[0].id!}-0.html`} />
+          {channels.length > 0 ? (
+            <iframe name="iframe" src={`html/${channels[0].id!}-0.html`} />
+          ) : (
+            <></>
+          )}
         </div>
         <script
           dangerouslySetInnerHTML={{
@@ -398,7 +474,12 @@ const HtmlPage: React.FunctionComponent = (props) => {
         <meta httpEquiv="X-UA-Compatible" content="IE=edge" />
         <meta charSet="UTF-8" />
         <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-        <title>Slack</title>
+        <title>{team.name} - Slack</title>
+        <link
+          rel="icon"
+          type="image/png"
+          href={getTeamIconPath(team, true).relativePath}
+        />
         <link rel="stylesheet" href={`${base}style.css`} />
       </head>
       <body>{props.children}</body>
@@ -433,7 +514,15 @@ const Header: React.FunctionComponent<HeaderProps> = (props) => {
     <div className="header">
       <h1>{channel.name || channel.id}</h1>
       {created}
-      <p className="topic">{channel.topic?.value}</p>
+      <p
+        className="topic"
+        dangerouslySetInnerHTML={{
+          __html: escapeForSlackWithMarkdown(
+            channel.topic?.value || "",
+            markdownToHtmlOptions,
+          ).replaceAll(EMOJI_PREFIX_BUGFIX, ""),
+        }}
+      ></p>
       <Pagination
         channelId={channel.id!}
         index={index}
@@ -479,7 +568,7 @@ const Pagination: React.FunctionComponent<PaginationProps> = (props) => {
     options.push(
       <option selected={selected} key={value} value={value}>
         {text}
-      </option>
+      </option>,
     );
   }
 
@@ -554,7 +643,7 @@ async function renderAndWrite(page: JSX.Element, filePath: string) {
 
 export async function getChannelsToCreateFilesFor(
   channels: Array<Channel>,
-  newMessages: Record<string, number>
+  newMessages: Record<string, number>,
 ) {
   const result: Array<Channel> = [];
 
@@ -593,7 +682,7 @@ async function createHtmlForChannel({
   const messages = await getMessages(channel.id!, true);
   const chunks = chunk(messages, MESSAGE_CHUNK);
   const spinner = ora(
-    `Rendering HTML for ${i + 1}/${total} ${channel.name || channel.id}`
+    `Rendering HTML for ${i + 1}/${total} ${channel.name || channel.id}`,
   ).start();
 
   // Calculate info about all chunks
@@ -614,7 +703,7 @@ async function createHtmlForChannel({
         chunkIndex: 0,
         chunksInfo: chunksInfo,
       },
-      spinner
+      spinner,
     );
   }
 
@@ -626,19 +715,49 @@ async function createHtmlForChannel({
         chunkIndex: chunkI,
         chunksInfo,
       },
-      spinner
+      spinner,
     );
   }
 
   spinner.succeed(
-    `Rendered HTML for ${i + 1}/${total} ${channel.name || channel.id}`
+    `Rendered HTML for ${i + 1}/${total} ${channel.name || channel.id}`,
   );
 }
 
-export async function createHtmlForChannels(channels: Array<Channel> = []) {
-  console.log(`\n Creating HTML files for ${channels.length} channels...`);
+export async function createHtmlForChannels(_channels: Array<Channel> = []) {
+  console.log(`\n Creating HTML files for ${_channels.length} channels...`);
 
+  channels = _channels;
   users = await getUsers();
+  team = await getTeam();
+  emojis = await getEmojis();
+  markdownToHtmlOptions = {
+    users: Object.entries(users).reduce(
+      (acc, [userId, user]) => {
+        acc[userId] =
+          user.profile?.display_name ||
+          user.profile?.real_name ||
+          user.name ||
+          userId;
+        return acc;
+      },
+      {} as Record<string, string>,
+    ),
+    customEmoji: Object.values(emojis).reduce(
+      (acc, emoji) => {
+        acc[emoji.name] = EMOJI_PREFIX_BUGFIX + emoji.path;
+        return acc;
+      },
+      {} as Record<string, string>,
+    ),
+    channels: channels.reduce(
+      (acc, channel) => {
+        acc[channel.id!] = getChannelName(channel);
+        return acc;
+      },
+      {} as Record<string, string>,
+    ),
+  };
   slackArchiveData = await getSlackArchiveData();
   me = slackArchiveData.auth?.user_id
     ? users[slackArchiveData.auth?.user_id]

@@ -1,8 +1,8 @@
 import { uniqBy } from "lodash-es";
 import inquirer from "inquirer";
 import fs from "fs-extra";
-import { User } from "@slack/web-api/dist/response/UsersInfoResponse";
-import { Channel } from "@slack/web-api/dist/response/ConversationsListResponse";
+import { User } from "@slack/web-api/dist/types/response/UsersInfoResponse";
+import { Channel } from "@slack/web-api/dist/types/response/ConversationsListResponse";
 import ora from "ora";
 
 import {
@@ -17,6 +17,7 @@ import {
   DATE_FILE,
   EMOJIS_DATA_PATH,
   NO_SLACK_CONNECT,
+  TEAM_DATA_PATH,
 } from "./config.js";
 import { downloadExtras } from "./messages.js";
 import { downloadMessages } from "./messages.js";
@@ -29,12 +30,13 @@ import { createBackup, deleteBackup, deleteOlderBackups } from "./backup.js";
 import { isValid, parseISO } from "date-fns";
 import { createSearch } from "./search.js";
 import { write, writeAndMerge } from "./data-write.js";
-import { messagesCache, getUsers, getChannels } from "./data-load.js";
+import { messagesCache, getUsers, getChannels, getTeam } from "./data-load.js";
 import { getSlackArchiveData, setSlackArchiveData } from "./archive-data.js";
-import { downloadEmojiList, downloadEmojis } from "./emoji.js";
+import { downloadEmojiList, downloadEmojis, findEmojis } from "./emoji.js";
 import { downloadAvatars } from "./users.js";
 import { downloadChannels } from "./channels.js";
 import { authTest } from "./web-client.js";
+import { downloadTeamData, downloadTeamIcons } from "./team.js";
 
 const { prompt } = inquirer;
 
@@ -67,7 +69,7 @@ async function selectMergeFiles(): Promise<boolean> {
 }
 
 async function selectChannels(
-  channels: Array<Channel>
+  channels: Array<Channel>,
 ): Promise<Array<Channel>> {
   const choices = channels.map((channel) => ({
     name: channel.name || channel.id || "Unknown",
@@ -112,7 +114,7 @@ async function selectChannelTypes(): Promise<Array<string>> {
   ];
 
   if (CHANNEL_TYPES) {
-    return CHANNEL_TYPES.split(',');
+    return CHANNEL_TYPES.split(",");
   }
 
   if (AUTOMATIC_MODE || NO_SLACK_CONNECT) {
@@ -198,13 +200,13 @@ async function getAuthTest() {
     spinner.fail(`Authentication with Slack failed.`);
 
     console.log(
-      `Authentication with Slack failed. The error was: ${result.error}`
+      `Authentication with Slack failed. The error was: ${result.error}`,
     );
     console.log(
-      `The provided token was ${config.token}. Double-check the token and try again.`
+      `The provided token was ${config.token}. Double-check the token and try again.`,
     );
     console.log(
-      `For more information on the error code, see the error table at https://api.slack.com/methods/auth.test`
+      `For more information on the error code, see the error table at https://api.slack.com/methods/auth.test`,
     );
     console.log(`This tool will now exit.`);
 
@@ -232,7 +234,7 @@ export async function main() {
   await createBackup();
 
   const slackArchiveData = await getSlackArchiveData();
-  const users: Record<string, User> = await getUsers();
+  const users = await getUsers();
   const channelTypes = (await selectChannelTypes()).join(",");
 
   slackArchiveData.auth = await getAuthTest();
@@ -246,6 +248,12 @@ export async function main() {
   // do that as needed
   const emojis = await downloadEmojiList();
   await writeAndMerge(EMOJIS_DATA_PATH, emojis);
+
+  const team = await downloadTeamData();
+  await writeAndMerge(TEAM_DATA_PATH, team);
+  if (!NO_SLACK_CONNECT) {
+    await downloadTeamIcons(team);
+  }
 
   // Do we want to merge data?
   await selectMergeFiles();
@@ -261,7 +269,7 @@ export async function main() {
   // - or channels that we didn't make HTML for yet
   const channelsToCreateFilesFor = await getChannelsToCreateFilesFor(
     selectedChannels,
-    newMessages
+    newMessages,
   );
   await createHtmlForChannels(channelsToCreateFilesFor);
 
@@ -295,18 +303,19 @@ export async function main() {
       let downloadData = await downloadMessages(
         channel,
         i,
-        selectedChannels.length
+        selectedChannels.length,
       );
       let result = downloadData.messages;
       newMessages[channel.id] = downloadData.new;
 
       await downloadExtras(channel, result, users);
-      await downloadEmojis(result, emojis);
+      const emojisToDownload = await findEmojis(result);
+      await downloadEmojis(emojisToDownload, emojis);
       await downloadAvatars();
 
       // Sort messages
       const spinner = ora(
-        `Saving message data for ${channel.name || channel.id} to disk`
+        `Saving message data for ${channel.name || channel.id} to disk`,
       ).start();
       spinner.render();
 
@@ -318,7 +327,7 @@ export async function main() {
       await writeAndMerge(USERS_DATA_PATH, users);
       fs.outputFileSync(
         getChannelDataFilePath(channel.id),
-        JSON.stringify(result, undefined, 2)
+        JSON.stringify(result, undefined, 2),
       );
 
       // Download files. This needs to run after the messages are saved to disk

@@ -1,31 +1,38 @@
-import path from "path";
-import ora from "ora";
 import fs from "fs";
-import { createRequire } from "node:module";
+import ora from "ora";
+import path from "path";
 
-import { EMOJIS_DIR, NO_SLACK_CONNECT } from "./config.js";
+import {
+  Accessory,
+  AccessoryElement,
+  PurpleElement,
+  TitleBlockElement,
+} from "@slack/web-api/dist/types/response/ConversationsHistoryResponse.js";
+import emojiData from "emoji-datasource-google" assert { type: "json" };
+import {
+  __dirname,
+  BASIC_EMOJIS_DIR,
+  DATA_DIR,
+  EMOJIS_DIR,
+  NO_SLACK_CONNECT,
+} from "./config.js";
+import { getEmoji } from "./data-load.js";
 import { downloadURL } from "./download-files.js";
 import { ArchiveMessage, Emojis } from "./interfaces.js";
 import { getWebClient } from "./web-client.js";
 
-const require = createRequire(import.meta.url);
-const emojiData = require("emoji-datasource");
+const BASIC_EMOJI_LIST: {
+  short_name: string;
+  short_names: string[];
+  image: string;
+  unified: string;
+}[] = emojiData;
 
-let _unicodeEmoji: Record<string, string>;
-function getUnicodeEmoji() {
-  if (_unicodeEmoji) {
-    return _unicodeEmoji;
-  }
-
-  _unicodeEmoji = {};
-  for (const emoji of emojiData) {
-    _unicodeEmoji[emoji.short_name as string] = emoji.unified;
-  }
-
-  return _unicodeEmoji;
-}
-
-export function getEmojiFilePath(name: string, extension?: string) {
+function getEmojiFilePath(
+  name: string,
+  extension: string | null,
+  relative: boolean,
+): string | null {
   // If we have an extension, return the correct path
   if (extension) {
     return path.join(EMOJIS_DIR, `${name}${extension}`);
@@ -36,35 +43,23 @@ export function getEmojiFilePath(name: string, extension?: string) {
   const extensions = [".png", ".jpg", ".gif"];
   for (const ext of extensions) {
     if (fs.existsSync(path.join(EMOJIS_DIR, `${name}${ext}`))) {
-      return path.join(EMOJIS_DIR, `${name}${ext}`);
+      const result = path.join(EMOJIS_DIR, `${name}${ext}`);
+      if (relative) {
+        return path.relative(DATA_DIR, result);
+      } else {
+        return result;
+      }
     }
   }
+  return null;
 }
 
-export function isEmojiUnicode(name: string) {
-  const unicodeEmoji = getUnicodeEmoji();
-  return !!unicodeEmoji[name];
-}
-
-export function getEmojiUnicode(name: string) {
-  const unicodeEmoji = getUnicodeEmoji();
-  const unified = unicodeEmoji[name];
-  const split = unified.split("-");
-
-  return split
-    .map((code) => {
-      return String.fromCodePoint(parseInt(code, 16));
-    })
-    .join("");
-}
-
-export async function downloadEmojiList(): Promise<Emojis> {
+export async function downloadEmojiList(): Promise<Record<string, string>> {
   if (NO_SLACK_CONNECT) {
     return {};
   }
 
   const response = await getWebClient().emoji.list();
-
   if (response.ok) {
     return response.emoji!;
   } else {
@@ -72,47 +67,77 @@ export async function downloadEmojiList(): Promise<Emojis> {
   }
 }
 
-export async function downloadEmoji(
+async function downloadEmoji(
   name: string,
   url: string,
-  emojis: Emojis
-): Promise<void> {
-  // Alias?
-  if (url.startsWith("alias:")) {
-    const alias = getEmojiAlias(url);
+): Promise<string | null> {
+  const extension = path.extname(url);
+  const filePath = getEmojiFilePath(name, extension, false);
 
-    if (!emojis[alias]) {
-      console.warn(
-        `Found emoji alias ${alias}, which does not exist in master emoji list`
-      );
-      return;
+  if (filePath) {
+    await downloadURL(url, filePath!);
+  }
+  return filePath;
+}
+
+function getEmojiFinalName(
+  name: string,
+  emojiList: Record<string, string>,
+): string | null {
+  const url = emojiList[name];
+  if (url) {
+    const alias = getEmojiAlias(url);
+    if (alias) {
+      return getEmojiFinalName(alias, emojiList);
     } else {
-      return downloadEmoji(alias, emojis[alias], emojis);
+      return name;
     }
   }
-
-  const extension = path.extname(url);
-  const filePath = getEmojiFilePath(name, extension);
-
-  return downloadURL(url, filePath!);
+  return null;
 }
 
-export function getEmojiAlias(name: string): string {
-  // Ugh regex methods - this should turn "alias:hi-bob" into "hi-bob"
-  const alias = [...name.matchAll(/alias:(.*)/g)][0][1]!;
-  return alias!;
+function getEmojiAlias(url: string): string | null {
+  if (url.startsWith("alias:")) {
+    // Ugh regex methods - this should turn "alias:hi-bob" into "hi-bob"
+    const alias = [...url.matchAll(/alias:(.*)/g)][0][1]!;
+    return alias!;
+  } else {
+    return null;
+  }
 }
 
-export async function downloadEmojis(
-  messages: Array<ArchiveMessage>,
-  emojis: Emojis
+async function copyBasicEmoji(imageName: string) {
+  const sourcePath = path.join(
+    __dirname,
+    "..",
+    "node_modules/emoji-datasource-google/img/google/64",
+    imageName,
+  );
+  const destinationPath = path.join(BASIC_EMOJIS_DIR, imageName);
+  fs.cpSync(sourcePath, destinationPath);
+}
+
+function findEmojisInMessageBlocks(
+  blocks: (TitleBlockElement | Accessory | AccessoryElement | PurpleElement)[],
+  emojiSet: Set<string>,
 ) {
-  const regex = /:[^:\s]*(?:::[^:\s]*)*:/g;
+  for (const block of blocks) {
+    if (block.type === "emoji") {
+      const emojiName = (block as PurpleElement).name;
+      if (emojiName) {
+        emojiSet.add(emojiName);
+      }
+    } else if ("elements" in block && block.elements) {
+      findEmojisInMessageBlocks(block.elements, emojiSet);
+    }
+  }
+}
 
+export async function findEmojis(messages: Array<ArchiveMessage>) {
   const spinner = ora(
-    `Scanning 0/${messages.length} messages for emoji shortcodes...`
+    `Scanning 0/${messages.length} messages for emoji shortcodes...`,
   ).start();
-  let downloaded = 0;
+  const emojisToDownload = new Set<string>();
 
   for (const [i, message] of messages.entries()) {
     spinner.text = `Scanning ${i}/${messages.length} messages for emoji shortcodes...`;
@@ -120,16 +145,112 @@ export async function downloadEmojis(
     // Reactions
     if (message.reactions && message.reactions.length > 0) {
       for (const reaction of message.reactions) {
-        const reactEmoji = emojis[reaction.name!];
-        if (reactEmoji) {
-          downloaded++;
-          await downloadEmoji(reaction.name!, reactEmoji, emojis);
-        }
+        emojisToDownload.add(reaction.name);
+      }
+    }
+
+    // Text
+    findEmojisInMessageBlocks(message.blocks || [], emojisToDownload);
+  }
+
+  spinner.succeed(`Scanned ${messages.length} messages for emoji`);
+
+  return [...emojisToDownload];
+}
+
+export async function downloadEmojis(
+  emojisToDownload: Array<string>,
+  emojiList: Record<string, string>,
+): Promise<void> {
+  const spinner = ora(
+    `Fetching 0/${emojisToDownload.length} emojis...`,
+  ).start();
+
+  fs.mkdirSync(BASIC_EMOJIS_DIR, { recursive: true });
+
+  let downloaded = 0;
+  let copied = 0;
+  for (const [i, name] of emojisToDownload.entries()) {
+    spinner.text = `Downloading ${i}/${emojisToDownload.length} emoji...`;
+
+    if (emojiList[name]) {
+      const finalName = getEmojiFinalName(name, emojiList);
+      const path =
+        finalName && (await downloadEmoji(finalName, emojiList[finalName]));
+      if (path) {
+        downloaded++;
+      } else {
+        console.warn(`Unable to download the emoji :${name}:`);
+      }
+    } else {
+      const baseName = name.match(/::/) && name.split("::")[0];
+      const basicEmoji = BASIC_EMOJI_LIST.find(
+        (emoji) =>
+          emoji.short_names.includes(name) ||
+          (baseName && emoji.short_names.includes(baseName)),
+      );
+      if (basicEmoji) {
+        copied++;
+        copyBasicEmoji(basicEmoji.image);
+      } else {
+        console.warn(
+          `Unable to find the emoji :${name}: neither in custom nor basic emoji`,
+        );
       }
     }
   }
 
+  const actual = downloaded + copied;
+  const total = emojisToDownload.length;
+  const message = `Downloaded ${downloaded} custom emoji and copied ${copied} basic emoji (${actual}/${total})`;
+  if (actual < total) {
+    spinner.warn(message);
+  } else {
+    spinner.succeed(message);
+  }
+}
+
+export async function getEmojis(): Promise<Emojis> {
+  const customEmojiList = await getEmoji();
+
+  const spinner = ora(
+    `Indexing ${BASIC_EMOJI_LIST.length} basic emoji...`,
+  ).start();
+
+  const basicEmojis: Emojis = BASIC_EMOJI_LIST.reduce((acc, emoji) => {
+    for (const short_name of emoji.short_names) {
+      acc[short_name] = {
+        custom: false,
+        name: short_name,
+        unicode: emoji.unified,
+        path: path.relative(DATA_DIR, path.join(BASIC_EMOJIS_DIR, emoji.image)),
+      };
+    }
+    return acc;
+  }, {} as Emojis);
+
+  const emojiNames = Object.keys(customEmojiList);
+  const customEmojis: Emojis = {};
+  for (const [i, name] of emojiNames.entries()) {
+    spinner.text = `Finding ${i}/${emojiNames.length} emoji...`;
+
+    const finalName = getEmojiFinalName(name, customEmojiList);
+    const path = finalName && getEmojiFilePath(finalName, null, true);
+    if (path) {
+      customEmojis[name] = {
+        custom: true,
+        name,
+        path,
+      };
+    }
+  }
+
   spinner.succeed(
-    `Scanned ${messages.length} messages for emoji (and downloaded ${downloaded})`
+    `Found ${BASIC_EMOJI_LIST.length} basic emoji and ${Object.keys(customEmojis).length} custom emoji`,
   );
+
+  return {
+    ...basicEmojis,
+    ...customEmojis,
+  };
 }
