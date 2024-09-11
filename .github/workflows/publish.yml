@@ -1,0 +1,29 @@
+name: Publish to npm
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      - name: Install Volta
+        uses: volta-cli/action@v1
+
+      - name: Install dependencies
+        run: yarn install --frozen-lockfile
+
+      - name: Build the package
+        run: yarn build
+
+      - name: Publish to npm
+        run: yarn npm publish --access public
+        env:
+          YARN_NPM_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
