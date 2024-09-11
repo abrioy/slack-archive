@@ -1,16 +1,16 @@
 {
   "name": "@a.brioy/slack-archive",
-  "version": "1.7.1",
+  "version": "1.7.11",
   "description": "Create static HTML archives for your Slack workspaces",
   "scripts": {
     "prettier": "npx prettier --write src/*",
-    "cli": "ts-node src/cli.ts",
+    "cli": "ts-node src/index.ts",
     "html": "ts-node src/create-html.tsx",
     "test": "echo \"Error: no test specified\" && exit 1",
     "build": "tsc",
     "watch": "tsc -w"
   },
-  "bin": "lib/cli.js",
+  "bin": "./bin/slack-archive.js",
   "type": "module",
   "keywords": [
     "slack",
@@ -51,7 +51,7 @@
     "@types/react-dom": "^17.0.11",
     "ts-node": "^10.8.1",
     "tslib": "^2.4.0",
-    "typescript": "^4.7.4"
+    "typescript": "^5.6.2"
   },
   "ts-node": {
     "files": true

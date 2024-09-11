@@ -5,3 +5,4 @@ slack-archive
 *.log
 .token
 lib
+dist

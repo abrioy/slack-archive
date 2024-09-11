@@ -20,6 +20,7 @@ import { getEmoji } from "./data-load.js";
 import { downloadURL } from "./download-files.js";
 import { ArchiveMessage, Emojis } from "./interfaces.js";
 import { getWebClient } from "./web-client.js";
+import { createRequire } from "node:module";
 
 const BASIC_EMOJI_LIST: {
   short_name: string;
@@ -27,6 +28,12 @@ const BASIC_EMOJI_LIST: {
   image: string;
   unified: string;
 }[] = emojiData;
+
+const EMOJI_PNG_PATH = path.join(
+  createRequire(import.meta.url).resolve("emoji-datasource-google"),
+  "..",
+  "img/google/64",
+);
 
 function getEmojiFilePath(
   name: string,
@@ -107,12 +114,7 @@ function getEmojiAlias(url: string): string | null {
 }
 
 async function copyBasicEmoji(imageName: string) {
-  const sourcePath = path.join(
-    __dirname,
-    "..",
-    "node_modules/emoji-datasource-google/img/google/64",
-    imageName,
-  );
+  const sourcePath = path.join(EMOJI_PNG_PATH, imageName);
   const destinationPath = path.join(BASIC_EMOJIS_DIR, imageName);
   fs.cpSync(sourcePath, destinationPath);
 }
